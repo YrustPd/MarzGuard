@@ -564,7 +564,7 @@ mg_check_network() {
 mg_collect_stats_map() {
     MG_CPU_CURRENT=()
     MG_MEM_CURRENT=()
-    local line cid cpu mem
+    local cid cpu mem
     while IFS='|' read -r cid cpu mem; do
         if [[ -z $cid ]]; then
             continue
@@ -590,7 +590,7 @@ mg_monitor_iteration() {
 
     mg_collect_stats_map
 
-    local line cid cname role ts
+    local cid cname role ts
     while IFS='|' read -r cid cname role ts; do
         if [[ -z $cid ]]; then
             continue
@@ -708,7 +708,7 @@ mg_manual_limit_mem() {
         mg_log ERROR "Cannot apply memory limit: runtime unavailable"
         return 1
     fi
-    local line cid cname role rc=0
+    local cid cname role rc=0
     while IFS='|' read -r cid cname role; do
         if [[ -z $cid ]]; then
             continue
