@@ -1,0 +1,12 @@
+# Logs
+*.log
+
+# Runtime state
+/tmp/
+*.tmp
+
+# Editors
+*.swp
+.DS_Store
+.idea/
+.vscode/

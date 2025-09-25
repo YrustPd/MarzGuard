@@ -1,0 +1,12 @@
+/var/log/marzguard.log {
+    su root root
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+    postrotate
+        systemctl kill -s HUP MarzGuard >/dev/null 2>&1 || true
+    endscript
+}

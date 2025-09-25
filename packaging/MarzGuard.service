@@ -1,0 +1,18 @@
+[Unit]
+Description=MarzGuard container watchdog
+After=network-online.target docker.service podman.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/marzguard.conf
+ExecStart=/usr/bin/env bash -lc 'source /usr/local/lib/marzguard/marzguard-core.sh; mg_monitor_loop'
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+WorkingDirectory=/usr/local/lib/marzguard
+
+[Install]
+WantedBy=multi-user.target

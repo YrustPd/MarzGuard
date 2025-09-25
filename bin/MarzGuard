@@ -1,0 +1,365 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_NAME=${0##*/}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_CANDIDATE="$SCRIPT_DIR/../lib/marzguard-core.sh"
+if [[ -f "$LIB_CANDIDATE" ]]; then
+    CORE_LIB="$LIB_CANDIDATE"
+else
+    CORE_LIB="/usr/local/lib/marzguard/marzguard-core.sh"
+fi
+
+if [[ ! -f "$CORE_LIB" ]]; then
+    echo "MarzGuard core library not found at $CORE_LIB" >&2
+    exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$CORE_LIB"
+
+MG_LOG_TO_STDOUT=1
+mg_load_config
+
+usage() {
+    cat <<'USAGE'
+MarzGuard - container watchdog and control interface
+
+Usage:
+  MarzGuard status
+  MarzGuard print-detected
+  MarzGuard self-test
+  MarzGuard doctor
+  MarzGuard logs [-f]
+  MarzGuard config [--edit]
+  MarzGuard limit cpu <cpus> [--app|--db|--both]
+  MarzGuard limit mem <size> [--app|--db|--both]
+  MarzGuard restart [--app|--db|--both]
+  MarzGuard restart-docker
+  MarzGuard reload
+  MarzGuard version
+
+Set MARZGUARD_MOCK=1 to run in mock mode for experimentation.
+USAGE
+}
+
+ensure_role_arg() {
+    local selector=${1:-both}
+    case "$selector" in
+        --app|app) echo "app" ;;
+        --db|db) echo "db" ;;
+        --both|both|"") echo "both" ;;
+        *)
+            echo "Unknown role selector: $selector" >&2
+            exit 1
+            ;;
+    esac
+}
+
+describe_service_state() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "Service: systemd tooling unavailable"
+        return 0
+    fi
+    if systemctl list-unit-files MarzGuard.service >/dev/null 2>&1; then
+        local status="$(systemctl is-active MarzGuard 2>/dev/null || true)"
+        local enabled="$(systemctl is-enabled MarzGuard 2>/dev/null || true)"
+        echo "Service: $status (enabled: $enabled)"
+    else
+        echo "Service: not installed"
+    fi
+}
+
+last_action_for() {
+    local cid=$1
+    local action_file="$MG_RUNTIME_DIR/last-actions.log"
+    if [[ -r $action_file ]]; then
+        local record
+        record=$(awk -F'|' -v id="$cid" '$2==id {print $4 " " $5}' "$action_file" | tail -n1)
+        if [[ -n $record ]]; then
+            echo "$record"
+            return 0
+        fi
+    fi
+    echo "none"
+}
+
+cmd_status() {
+    describe_service_state
+    local runtime
+    runtime=$(mg_resolve_runtime || true)
+    if [[ -z $runtime ]]; then
+        runtime=unavailable
+    fi
+    local mode=live
+    if mg_is_mock_mode; then
+        mode=mock
+    fi
+    echo "Runtime: $runtime"
+    echo "Mode: $mode"
+    mg_detect_containers || true
+    mg_collect_stats_map
+    echo "Detected containers:"
+    if [[ ! -s "$MG_STATE_DIR/detected" ]]; then
+        echo "  (none)"
+    else
+        while IFS='|' read -r cid cname role ts; do
+            [[ -z $cid ]] && continue
+            local cpu=${MG_CPU_CURRENT[$cid]:-0}
+            local mem=${MG_MEM_CURRENT[$cid]:-0}
+            local last_action
+            last_action=$(last_action_for "$cid")
+            printf '  %-20s %-12s CPU=%6s%% MEM=%6s%% last=%s\n' "$cname" "($role)" "$cpu" "$mem" "$last_action"
+        done <"$MG_STATE_DIR/detected"
+    fi
+    echo "Recent actions:"
+    local actions
+    actions=$(mg_recent_actions 5 || true)
+    if [[ -n $actions ]]; then
+        printf '%s\n' "$actions" | sed 's/^/  /'
+    else
+        echo "  (none recorded)"
+    fi
+    echo "Thresholds: CPU>${MG_CPU_LIMIT_PERCENT}% MEM>${MG_MEM_LIMIT_PERCENT}% breaches ${MG_MIN_BREACHES}/${MG_WINDOW_SIZE}"
+}
+
+cmd_print_detected() {
+    mg_detect_containers || true
+    if [[ ! -s "$MG_STATE_DIR/detected" ]]; then
+        echo "No containers matched current filters"
+        return 0
+    fi
+    while IFS='|' read -r cid cname role ts; do
+        [[ -z $cid ]] && continue
+        printf '%s|%s|%s\n' "$cid" "$cname" "$role"
+    done <"$MG_STATE_DIR/detected"
+}
+
+cmd_self_test() {
+    echo "Running MarzGuard self-test (mock mode)..."
+    MG_LOG_LEVEL=INFO
+    MG_LOG_TO_STDOUT=1
+    MG_MOCK_MODE=1
+    mg_self_test
+    echo "Self-test completed"
+}
+
+cmd_doctor() {
+    local missing=0
+    local required=(bash awk sed grep curl)
+    echo "Checking prerequisites..."
+    local tool
+    for tool in "${required[@]}"; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            echo " - Missing utility: $tool"
+            missing=1
+        fi
+    done
+    local runtime
+    runtime=$(mg_resolve_runtime || true)
+    if [[ -z $runtime || $runtime == "mock" ]]; then
+        echo " - Container runtime not available (docker or podman)"
+        missing=1
+    else
+        echo " - Runtime detected: $runtime"
+        if ! "$runtime" info >/dev/null 2>&1; then
+            echo " - Runtime command present but daemon not responding"
+            missing=1
+        fi
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        if ! systemctl is-active docker >/dev/null 2>&1 && ! systemctl is-active podman >/dev/null 2>&1; then
+            echo " - Neither docker nor podman service appears active"
+            missing=1
+        fi
+    fi
+    if (( missing == 0 )); then
+        echo "All required components detected"
+    else
+        echo "Doctor detected issues above. Run install.sh or address manually."
+    fi
+    return $missing
+}
+
+cmd_logs() {
+    local follow=0
+    if [[ ${1:-} == "-f" ]]; then
+        follow=1
+    fi
+    if command -v journalctl >/dev/null 2>&1; then
+        if (( follow )); then
+            journalctl -u MarzGuard -f || return $?
+        else
+            journalctl -u MarzGuard --no-pager -n 50 || return $?
+        fi
+        return 0
+    fi
+    if [[ ! -f "$MG_LOG_FILE" ]]; then
+        echo "Log file $MG_LOG_FILE not found"
+        return 1
+    fi
+    if (( follow )); then
+        tail -f "$MG_LOG_FILE" || return $?
+    else
+        tail -n 50 "$MG_LOG_FILE" || return $?
+    fi
+}
+
+cmd_config() {
+    local edit=0
+    if [[ ${1:-} == "--edit" ]]; then
+        edit=1
+    fi
+    echo "Config file: $MG_CONFIG_FILE"
+    if (( edit )); then
+        local editor=${EDITOR:-vi}
+        "$editor" "$MG_CONFIG_FILE"
+    else
+        if [[ -f "$MG_CONFIG_FILE" ]]; then
+            cat "$MG_CONFIG_FILE"
+        else
+            echo "Configuration file not found"
+        fi
+    fi
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "This command requires root privileges" >&2
+        exit 1
+    fi
+}
+
+cmd_limit_cpu() {
+    require_root
+    local value=$1
+    local role
+    role=$(ensure_role_arg "${2:---both}")
+    if [[ ! $value =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "CPU value must be numeric, e.g. 1.5" >&2
+        exit 1
+    fi
+    if mg_manual_limit_cpu "$value" "$role"; then
+        echo "Applied CPU limit $value to role $role"
+    else
+        echo "Failed to apply CPU limit" >&2
+        exit 1
+    fi
+}
+
+cmd_limit_mem() {
+    require_root
+    local value=$1
+    local role
+    role=$(ensure_role_arg "${2:---both}")
+    if [[ ! $value =~ ^[0-9]+([kKmMgG][iI]?[bB]?|[bB]|)$ ]]; then
+        echo "Memory value must be numeric with optional unit, e.g. 512MiB" >&2
+        exit 1
+    fi
+    if mg_manual_limit_mem "$value" "$role"; then
+        echo "Applied memory limit $value to role $role"
+    else
+        echo "Failed to apply memory limit" >&2
+        exit 1
+    fi
+}
+
+cmd_restart() {
+    require_root
+    local role
+    role=$(ensure_role_arg "${1:---both}")
+    if mg_manual_restart "$role"; then
+        echo "Restarted containers for role $role"
+    else
+        echo "Failed to restart one or more containers" >&2
+        exit 1
+    fi
+}
+
+cmd_restart_docker() {
+    require_root
+    if [[ ${MG_ALLOW_DOCKER_RESTART:-0} -ne 1 ]]; then
+        echo "Docker/Podman restart disabled in configuration" >&2
+        exit 1
+    fi
+    read -r -p "Restart the container runtime now? [y/N] " answer
+    answer=${answer:-N}
+    case ${answer,,} in
+        y|yes)
+            if mg_manual_runtime_restart; then
+                echo "Runtime restart requested"
+            else
+                echo "Runtime restart failed" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Cancelled"
+            ;;
+    esac
+}
+
+cmd_reload() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files MarzGuard.service >/dev/null 2>&1; then
+        if systemctl kill -s HUP MarzGuard >/dev/null 2>&1; then
+            echo "Signalled MarzGuard service to reload"
+            return 0
+        fi
+    fi
+    mg_reload_config
+    echo "Reloaded configuration in current session"
+}
+
+cmd_version() {
+    echo "MarzGuard $MG_VERSION"
+}
+
+main() {
+    local subcommand=${1:-}
+    if [[ -z $subcommand ]]; then
+        usage
+        exit 0
+    fi
+    shift || true
+    case $subcommand in
+        status) cmd_status "$@" ;;
+        print-detected) cmd_print_detected "$@" ;;
+        self-test) cmd_self_test "$@" ;;
+        doctor) cmd_doctor "$@" ;;
+        logs) cmd_logs "$@" ;;
+        config) cmd_config "$@" ;;
+        limit)
+            local limit_type=${1:-}
+            shift || true
+            case $limit_type in
+                cpu)
+                    if [[ $# -lt 1 ]]; then
+                        echo "Usage: MarzGuard limit cpu <cpus> [--app|--db|--both]" >&2
+                        exit 1
+                    fi
+                    cmd_limit_cpu "$1" "${2:-}" ;;
+                mem)
+                    if [[ $# -lt 1 ]]; then
+                        echo "Usage: MarzGuard limit mem <size> [--app|--db|--both]" >&2
+                        exit 1
+                    fi
+                    cmd_limit_mem "$1" "${2:-}" ;;
+                *)
+                    echo "Unknown limit type: $limit_type" >&2
+                    exit 1 ;;
+            esac
+            ;;
+        restart) cmd_restart "${1:-}" ;;
+        restart-docker) cmd_restart_docker ;;
+        reload) cmd_reload ;;
+        version) cmd_version ;;
+        -h|--help|help) usage ;;
+        *)
+            echo "Unknown command: $subcommand" >&2
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

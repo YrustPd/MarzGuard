@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: ShellCheck scripts
+        run: |
+          shellcheck install.sh uninstall.sh bin/MarzGuard lib/marzguard-core.sh
+      - name: Self-test (mock mode)
+        run: |
+          chmod +x bin/MarzGuard
+          MARZGUARD_MOCK=1 ./bin/MarzGuard self-test
