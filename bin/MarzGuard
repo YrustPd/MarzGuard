@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_NAME=${0##*/}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LIB_CANDIDATE="$SCRIPT_DIR/../lib/marzguard-core.sh"
 if [[ -f "$LIB_CANDIDATE" ]]; then
@@ -18,6 +17,7 @@ fi
 # shellcheck disable=SC1090
 source "$CORE_LIB"
 
+# shellcheck disable=SC2034
 MG_LOG_TO_STDOUT=1
 mg_load_config
 
@@ -62,8 +62,10 @@ describe_service_state() {
         return 0
     fi
     if systemctl list-unit-files MarzGuard.service >/dev/null 2>&1; then
-        local status="$(systemctl is-active MarzGuard 2>/dev/null || true)"
-        local enabled="$(systemctl is-enabled MarzGuard 2>/dev/null || true)"
+        local status
+        status=$(systemctl is-active MarzGuard 2>/dev/null || true)
+        local enabled
+        enabled=$(systemctl is-enabled MarzGuard 2>/dev/null || true)
         echo "Service: $status (enabled: $enabled)"
     else
         echo "Service: not installed"
@@ -103,7 +105,7 @@ cmd_status() {
     if [[ ! -s "$MG_STATE_DIR/detected" ]]; then
         echo "  (none)"
     else
-        while IFS='|' read -r cid cname role ts; do
+        while IFS='|' read -r cid cname role _; do
             [[ -z $cid ]] && continue
             local cpu=${MG_CPU_CURRENT[$cid]:-0}
             local mem=${MG_MEM_CURRENT[$cid]:-0}
@@ -129,7 +131,7 @@ cmd_print_detected() {
         echo "No containers matched current filters"
         return 0
     fi
-    while IFS='|' read -r cid cname role ts; do
+    while IFS='|' read -r cid cname role _; do
         [[ -z $cid ]] && continue
         printf '%s|%s|%s\n' "$cid" "$cname" "$role"
     done <"$MG_STATE_DIR/detected"
@@ -137,8 +139,11 @@ cmd_print_detected() {
 
 cmd_self_test() {
     echo "Running MarzGuard self-test (mock mode)..."
+    # shellcheck disable=SC2034
     MG_LOG_LEVEL=INFO
+    # shellcheck disable=SC2034
     MG_LOG_TO_STDOUT=1
+    # shellcheck disable=SC2034
     MG_MOCK_MODE=1
     mg_self_test
     echo "Self-test completed"

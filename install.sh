@@ -104,14 +104,16 @@ install_docker_apt() {
     info "Installing Docker Engine via apt"
     pkg_install ca-certificates curl gnupg lsb-release
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/$(. /etc/os-release; echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    local distro_id codename
+    # shellcheck disable=SC1091
+    distro_id=$(. /etc/os-release; printf %s "$ID")
+    curl -fsSL "https://download.docker.com/linux/${distro_id}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
-    local codename
     codename=$(lsb_release -cs)
     printf 'deb [arch=%s signed-by=%s] https://download.docker.com/linux/%s %s stable\n' \
         "$(dpkg --print-architecture)" \
         /etc/apt/keyrings/docker.gpg \
-        "$(. /etc/os-release; echo "$ID")" \
+        "$distro_id" \
         "$codename" \
         >/etc/apt/sources.list.d/docker.list
     PKG_UPDATE_DONE=0

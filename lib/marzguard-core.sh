@@ -301,7 +301,7 @@ mg_trim_window() {
         echo ""
         return 0
     fi
-    arr=(${arr[@]:start})
+    arr=("${arr[@]:${start}}")
     echo "${arr[*]}"
 }
 
@@ -686,7 +686,7 @@ mg_manual_limit_cpu() {
         mg_log ERROR "Cannot apply CPU limit: runtime unavailable"
         return 1
     fi
-    local line cid cname role rc=0
+    local cid cname role rc=0
     while IFS='|' read -r cid cname role; do
         if [[ -z $cid ]]; then
             continue
@@ -780,6 +780,7 @@ mg_reload_config() {
     MG_CPU_WINDOWS=()
     MG_MEM_WINDOWS=()
     MG_LAST_ACTION_TS=()
+    # shellcheck disable=SC2034
     MG_LAST_ACTION_DESC=()
     mg_load_config
     mg_detect_containers || true
